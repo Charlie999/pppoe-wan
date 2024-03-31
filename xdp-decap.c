@@ -34,10 +34,10 @@ int xdp_decap_prog(struct xdp_md *ctx) {
         struct pppoehdr *pppoe_hdr = (struct pppoehdr*)cur_ptr;
         cur_ptr += sizeof(struct pppoehdr);
 
-        if (pppoe_hdr->vt != 0x11 | pppoe_hdr->code != 0x00) return XDP_PASS; // Invalid PPPoE session packet. May as well drop.
+        if (pppoe_hdr->vt != 0x11 | pppoe_hdr->code != 0x00) return XDP_PASS; // this will be LCP, IPCP or whatever. Pass it to the controller.
         
         unsigned short ppp_proto = *(unsigned short*)cur_ptr;
-        if (bpf_ntohs(ppp_proto) != PPP_PROTO_IP4) return XDP_PASS; // drop if not IP
+        if (bpf_ntohs(ppp_proto) != PPP_PROTO_IP4) return XDP_PASS; // pass if not IP. This is a questionably valid packet, however.
 
         data = (void *)(long)(ctx->data + sizeof(struct pppoehdr) + 2);
         struct ethhdr *eth_hdr_new = (struct ethhdr*)data; // new ethernet header
