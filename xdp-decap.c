@@ -2,14 +2,18 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
+#include <linux/if_arp.h>
 
 #include "pppoe.h"
+#include "arp.h"
+#include "control.h"
 
 #define PROTO_8021Q 0x8100
 #define PROTO_QINQ 0x88A8
 
 #define PROTO_IP4 0x0800
 #define PROTO_IP6 0x86DD
+#define PROTO_ARP 0x0806
 
 #define PROTO_INTERNAL_IP4 0xFFF0
 #define PROTO_INTERNAL_IP6 0xFFF1
@@ -17,12 +21,23 @@
 #define PPPOE_SESS_MIN_LEN (sizeof(struct ethhdr) + sizeof(struct pppoehdr) + 4)
 
 // page size 4K so no jumbo frames (but 1508 should be OK)
-// decap and ready the packet for tc bpf
+// applies to all pppoe session IDs (no filtering) so needs to be on vlan with ont directly
+
+struct {
+        __uint(type, BPF_MAP_TYPE_ARRAY);
+        __type(key, uint32_t);
+        __type(value, struct control_map);
+        __uint(max_entries, 1);
+} ctnl_map SEC(".maps");
 
 SEC("xdp-decap")
 int xdp_decap_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
+
+    int zero = 0;
+    struct control_map *ctnl = bpf_map_lookup_elem(&ctnl_map, &zero);
+    if (!ctnl) return XDP_PASS;
 
     if (data + PPPOE_SESS_MIN_LEN < data_end) {
         struct ethhdr *eth_hdr = (struct ethhdr*)data;
@@ -44,22 +59,24 @@ int xdp_decap_prog(struct xdp_md *ctx) {
         if (bpf_ntohs(ppp_proto) != PPP_PROTO_IP4 && bpf_ntohs(ppp_proto) != PPP_PROTO_IP6) return XDP_PASS; // pass if not IP.
 
         data = (void *)(long)(ctx->data + sizeof(struct pppoehdr) + 2);
+
+        if (data + sizeof(struct ethhdr) > data_end) return XDP_ABORTED; // please the verifier
+
         struct ethhdr *eth_hdr_new = (struct ethhdr*)data; // new ethernet header
 
-        unsigned char src[6] = {eth_hdr->h_source[0], eth_hdr->h_source[1], eth_hdr->h_source[2], eth_hdr->h_source[3], eth_hdr->h_source[4], eth_hdr->h_source[5]};
+        __builtin_memcpy(eth_hdr_new->h_dest, ctnl->targ_mac, ETH_ALEN);
+        __builtin_memcpy(eth_hdr_new->h_source, ctnl->port_targ_mac, ETH_ALEN);
 
-        __builtin_memcpy(eth_hdr_new->h_dest, eth_hdr->h_dest, ETH_ALEN);
-        __builtin_memcpy(eth_hdr_new->h_source, src, ETH_ALEN);
+        if (bpf_ntohs(ppp_proto) == PPP_PROTO_IP4) eth_hdr_new->h_proto = bpf_htons(PROTO_IP4); // optimize with LUT? or combine with above ip4/6 control flow?
+        else eth_hdr_new->h_proto = bpf_htons(PROTO_IP6);
 
-        if (bpf_ntohs(ppp_proto) == PPP_PROTO_IP4) eth_hdr_new->h_proto = bpf_htons(PROTO_INTERNAL_IP4); // optimize with LUT? or combine with above ip4/6 control flow?
-        else eth_hdr_new->h_proto = bpf_htons(PROTO_INTERNAL_IP6);
+        if (bpf_xdp_adjust_head(ctx, sizeof(struct pppoehdr) + 2) != 0UL) return XDP_ABORTED; // Failed to adjust header
 
-        if (bpf_xdp_adjust_head(ctx, sizeof(struct pppoehdr) + 2) != 0) return XDP_ABORTED; // Failed to adjust header
-
-        return XDP_PASS;
+        return bpf_redirect(ctnl->ifindex_targ, 0);
     }
 
     return XDP_PASS;
 }
+
 
 char _license[] SEC("license") = "GPL";
