@@ -3,6 +3,8 @@
 #include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
 #include <linux/if_arp.h>
+#include <linux/ip.h>
+#include <linux/icmp.h>
 
 #include "pppoe.h"
 #include "arp.h"
@@ -19,6 +21,8 @@
 #define PROTO_INTERNAL_IP6 0xFFF1
 
 #define PPPOE_SESS_MIN_LEN (sizeof(struct ethhdr) + sizeof(struct pppoehdr) + 4)
+
+#define L3_CSUM_STEP(a, b) ((((uint32_t)(a))+((uint32_t)(b))<0x10000)?((uint32_t)(a))+((uint32_t)(b)):((uint32_t)(a))+((uint32_t)(b)+1))
 
 // page size 4K so no jumbo frames (but 1508 should be OK)
 // applies to all pppoe session IDs (no filtering) so needs to be on vlan with ont directly
@@ -45,6 +49,11 @@ int xdp_encap_prog(struct xdp_md *ctx) {
     struct control_map *ctnl = bpf_map_lookup_elem(&ctnl_map, &zero);
     if (!ctnl) goto end;
 
+    if (data + (ctnl->ont_mtu - sizeof(struct pppoehdr_combined)) + 14 < data_end) {
+        bpf_printk("error! packet too long: data_end - data = %lu [%lu bytes data, PPPoE mtu: %lu] - dropping it.\n", data_end - data, (data_end - data) - 14, ctnl->ont_mtu - sizeof(struct pppoehdr_combined));
+        return XDP_DROP;
+    }
+
     if (data + sizeof(struct ethhdr) + sizeof(struct arphdr) + sizeof(struct arp_v4_tail) <= data_end && eth->h_proto == bpf_htons(PROTO_ARP)) { // ARP handler 
         // responds saying every IP in existence is at the port MAC.
         // ip route add default via 192.0.2.1 dev eth0
@@ -60,13 +69,13 @@ int xdp_encap_prog(struct xdp_md *ctx) {
         __builtin_memcpy(&old, tail, sizeof(old));
 
         __builtin_memcpy(&(tail->ip_target), &(old.ip_sender), sizeof(old.ip_sender));
-        __builtin_memcpy(&(tail->mac_target), &(old.mac_sender), ETH_ALEN); // they are next to each other in ram and this could be one copy
+        __builtin_memcpy(tail->mac_target, old.mac_sender, ETH_ALEN); // they are next to each other in ram and this could be one copy
 
         __builtin_memcpy(&(tail->ip_sender), &(old.ip_target), sizeof(old.ip_target));
-        __builtin_memcpy(&(tail->mac_sender), ctnl->port_targ_mac, ETH_ALEN);
+        __builtin_memcpy(tail->mac_sender, ctnl->port_targ_mac, ETH_ALEN);
 
-        __builtin_memcpy(&(eth->h_dest), &(eth->h_source), ETH_ALEN);
-        __builtin_memcpy(&(eth->h_source), ctnl->port_targ_mac, ETH_ALEN);
+        __builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+        __builtin_memcpy(eth->h_source, ctnl->port_targ_mac, ETH_ALEN);
 
         return XDP_TX;
     } else if (eth->h_proto == bpf_htons(PROTO_IP4) || eth->h_proto == bpf_htons(PROTO_IP6)) { // IP4/6->IPoPPPoE handler (encap)
@@ -82,8 +91,8 @@ int xdp_encap_prog(struct xdp_md *ctx) {
 	    data = (void *)(long)ctx->data;
 
         eth = (struct ethhdr*)data;
-        __builtin_memcpy(&(eth->h_source), ctnl->port_ont_mac, ETH_ALEN);
-        __builtin_memcpy(&(eth->h_dest), ctnl->ont_mac, ETH_ALEN);
+        __builtin_memcpy(eth->h_source, ctnl->port_ont_mac, ETH_ALEN);
+        __builtin_memcpy(eth->h_dest, ctnl->ont_mac, ETH_ALEN);
         eth->h_proto = bpf_htons(PROTO_PPPOE_SESS);
 
         struct pppoehdr_combined *pppoe = (struct pppoehdr_combined*)(data + sizeof(struct ethhdr));

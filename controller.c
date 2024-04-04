@@ -43,7 +43,7 @@ struct xdp_program *load_bpf_to_if_attach(uint32_t ifindex, const char* section,
         exit(errno);
     }
 
-    err = xdp_program__attach(ret, ifindex, XDP_MODE_NATIVE, 0);
+    err = xdp_program__attach(ret, ifindex, XDP_MODE_SKB, 0);
     if (err) {
         libxdp_strerror(err, msg, sizeof(msg));
         fprintf(stderr, "xdp_program__attach(): %s\n", msg);
@@ -223,13 +223,13 @@ int main(int argc, char** argv) {
 
     while(run){usleep(10000);}
 
-    xdp_program__detach(decap, ctnl.ifindex_ont, XDP_MODE_NATIVE, 0);
-    xdp_program__detach(encap, ctnl.ifindex_targ, XDP_MODE_NATIVE, 0);
+    xdp_program__detach(decap, ctnl.ifindex_ont, XDP_MODE_SKB, 0);
+    xdp_program__detach(encap, ctnl.ifindex_targ, XDP_MODE_SKB, 0);
 
     return EXIT_SUCCESS;
 
     fail:
-    xdp_program__detach(decap, ctnl.ifindex_ont, XDP_MODE_NATIVE, 0);
-    xdp_program__detach(encap, ctnl.ifindex_targ, XDP_MODE_NATIVE, 0);
+    xdp_program__detach(decap, ctnl.ifindex_ont, XDP_MODE_SKB, 0);
+    xdp_program__detach(encap, ctnl.ifindex_targ, XDP_MODE_SKB, 0);
     return errno;
 }
